@@ -7,49 +7,59 @@ This project is based on [micrograd](https://github.com/karpathy/micrograd) by A
 This example shows how to build and train a simple MLP neural network to solve the XOR problem using `micrograd-rs`.
 
 ```rust
-use micrograd_rs::{engine::Value, nn::MLP, operators::tanh};
+use micrograd_rs::{allocator::Allocator, nn::MLP, operators::tanh};
 
 fn main() {
+    let mut allocator = Allocator::new();
+
     // Create a simple MLP with 2 input neurons, one hidden layer with 3 neurons, and 1 output neuron
-    let mut mlp = MLP::new(&[2, 3, 1], tanh);
+    let mut mlp = MLP::new(&mut allocator, &[2, 3, 1], Some(tanh));
 
     // Training data for the XOR problem
     let inputs = [
-        vec![Value::from(0.0), Value::from(0.0)],
-        vec![Value::from(0.0), Value::from(1.0)],
-        vec![Value::from(1.0), Value::from(0.0)],
-        vec![Value::from(1.0), Value::from(1.0)],
+        vec![allocator.alloc(0.0), allocator.alloc(0.0)],
+        vec![allocator.alloc(0.0), allocator.alloc(1.0)],
+        vec![allocator.alloc(1.0), allocator.alloc(0.0)],
+        vec![allocator.alloc(1.0), allocator.alloc(1.0)],
     ];
     let targets = [
-        Value::from(0.0),
-        Value::from(1.0),
-        Value::from(1.0),
-        Value::from(0.0),
+        allocator.alloc(0.0),
+        allocator.alloc(1.0),
+        allocator.alloc(1.0),
+        allocator.alloc(0.0),
     ];
 
     // Training loop
     for epoch in 1..1001 {
-        let mut loss = Value::from(0.0);
+        let mut loss = allocator.alloc_t(0.0);
 
         for (input, target) in inputs.iter().zip(targets.iter()) {
-            let output = mlp.forward(input)[0].clone();
-            let diff = output - target.clone();
-            loss = loss + diff.clone() * diff;
+            let output = mlp.forward(input)[0];
+            let diff = output - *target;
+            loss = loss + diff * diff;
         }
 
-        loss.backward();
+        allocator.backward();
         mlp.step(0.15);
-        loss.zero_grads();
+        let loss_data = allocator.get(loss).data;
+        allocator.zero_grads();
 
         if epoch % 100 == 0 || epoch == 1 {
-            println!("Epoch {:>4}: Loss = {}", epoch, loss.data());
+            println!("Epoch {:>4}: Loss = {}", epoch, loss_data);
         }
     }
 
     // Test the trained MLP
     for input in inputs.iter() {
-        let output = mlp.forward(input)[0].clone();
-        println!("Input: {:?}, Output: {}", input, output.data());
+        let output = mlp.forward(input)[0];
+        println!(
+            "Input: {:?}, Output: {}",
+            input
+                .iter()
+                .map(|v| allocator.get(*v).data)
+                .collect::<Vec<_>>(),
+            allocator.get(output).data
+        );
     }
 }
 ```
@@ -59,29 +69,43 @@ fn main() {
 You can create custom operators by implementing a "forward" and "backward" function for the operator.
 
 ```rust
-use micrograd_rs::engine::Value;
+use micrograd_rs::allocator::{Allocator, ValueId};
 
-fn sqrt(this: Value<f64>) -> Value<f64> {
-    assert!(
-        this.data() >= 0.0,
-        "Cannot take the square root of a negative number"
-    );
-    let result = this.data().sqrt();
-    Value::new(result, sqrt_backward, vec![this])
+fn sqrt(x: ValueId<f64>) -> ValueId<f64> {
+    unsafe {
+        let allocator = x.allocator.as_mut().unwrap();
+        let x_val = allocator.get(x).data;
+        assert!(
+            x_val >= 0.0,
+            "Cannot take the square root of a negative number"
+        );
+        let result = x_val.sqrt();
+        allocator.alloc_temp(result, sqrt_backward, [x, ValueId::default()])
+    }
 }
 
 // base_grad: Gradient of the parent
 // base_val: Value of the parent
-fn sqrt_backward(base_grad: f64, base_val: f64, children: &mut [Value<f64>]) {
+fn sqrt_backward(
+    allocator: &mut Allocator<f64>,
+    base_grad: f64,
+    base_val: f64,
+    children: &[ValueId<f64>],
+) {
     // Derivative of sqrt(x) is 0.5 / sqrt(x)
     // In this case, since the operator is basically parent = sqrt(child), we can directly use base_val
-    children[0].add_grad(base_grad * 0.5 / base_val);
+    allocator
+        .get_mut(children[0])
+        .add_grad(base_grad * 0.5 / base_val);
 }
 
 fn main() {
-    let a = Value::from(16.0);
-    let b = sqrt(a.clone());
-    b.backward();
-    println!("Result: {}, Gradient: {}", b.data(), a.grad());
+    let mut allocator = Allocator::new();
+    let a = allocator.alloc(16.0);
+    let b = sqrt(a);
+    let result = allocator.get(b).data;
+    allocator.backward();
+
+    println!("Result: {}, Gradient: {}", result, allocator.get(a).grad);
 }
 ```
